@@ -46,8 +46,8 @@ def push_notification_to_user(msg):
     scl.load_system_host_keys()
     scl.set_missing_host_key_policy(paramiko.AutoAddPolicy())
     scl.connect('scinet03-ib0')
-    token = "aFrhFGs6L4ModXmgETbrp7jAJ6HTdW" # pushover API token
-    user  = "uAveqW3fQzw946tGD9XiLXACdGixqc" # pushover user ID
+    token = "xxxxxxxxxxxxxxxxxxxxxxxxx" # pushover API token
+    user  = "xxxxxxxxxxxxxxxxxxxxxxxxx" # pushover user ID
     url   = "https://api.pushover.net/1/messages.json"
     cmd   = "curl -s --form-string 'token={0}' --form-string 'user={1}' --form-string 'message={2}' {3}".format(token, user, msg, url)
     stdin, stdout, stderr = scl.exec_command(cmd)
