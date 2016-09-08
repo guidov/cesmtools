@@ -1,0 +1,340 @@
+#!/bin/bash
+
+# Author: Guido Vettoretti - 2015-05-14
+
+function usage {
+  echo 'This script is used to create a timeseries of all variables from a series of monthly mean CCSM4/CESM1 files'
+  echo 'Usage: cesmtimeseries takes 6 parameters'
+  echo '-d, --dir         = archive directory: $SCRATCH; $RES'
+  echo '-c, --case        = case name'
+  echo '-m, --model       = model component (atm lnd ocn ice all): all=atm+lnd+ocn+ice'
+  echo '-s, --startyear   = starting year e.g. 0'
+  echo '-e, --endyear     = ending year e.g. 999'
+  echo '-z, --compression = pass compression setting to nco (e.g see ncks --help) e.g. -4 == netcdf4 output -L1 == L-Z compression level1'
+  echo '-h, --help        = this message'
+  echo ''
+  echo 'Examples:'
+  echo 'To make timeseries of atm data from years 500 to 1500 and put the output in $SCRATCH'
+  echo 'Using data from monthly files in the input directory $RES'
+  echo ''
+  echo '--> cesmtimeseries -z "-4 -L1" -id $RES/archive -od $SCRATCH/diagdata -c case -m atm -s 500 -e 1499 2>&1 /tmp/logfile'
+  echo ''
+  echo 'Data will be input from $RES/archive/$case/(atm/hist; lnd/hist; ocn/hist; ice/hist)'
+  echo 'Data will be output to $SCRATCH/diagdata/$case/timeseries'
+  echo ''
+  echo 'Note: A min of 1 year of monthly data will be used (=10 files) if it exists (script works on years)'
+}
+
+#get command line options
+
+#number of command line arguments:
+clargs=$#
+
+while [[ $# > 1 ]]
+do
+  key="$1"
+
+  case $key in
+    -h|--help)
+      comp_switch="$2"
+      usage
+      exit 1
+      ;;
+    -id|--inputdir)
+      inputdir="$2"
+      shift
+      ;;
+    -od|--outputdir)
+      workdir="$2"
+      shift
+      ;;
+    -c|--case)
+      case="$2"
+      shift
+      ;;
+    -m|--model)
+      modelcomp="$2"
+      shift
+      ;;
+    -s|--startyear)
+      startyr="$2"
+      shift
+      ;;
+    -e|--endyear)
+      endyr="$2"
+      shift
+      ;;
+    -z|--compression)
+      comp_switch="$2"
+      shift
+      ;;
+    *)
+      # unknown option; exit 1
+      echo "unknown option"
+      usage
+      exit 1
+      ;;
+  esac
+  shift
+done
+
+echo $clargs
+
+if [ "$clargs" -lt 12 ]
+then
+  usage
+  exit 1
+fi
+
+
+# timeseries output directory
+tsdir=${workdir}/${case}/timeseries
+
+# archive of case on reserved filesystem
+resarch=$inputdir
+
+
+styr4d=$(printf "%04d" ${startyr})
+endyr4d=$(printf "%04d" ${endyr})
+dpm=(31 28 31 30 31 30 31 31 30 31 30 31)
+doy=(1 32 60 91 121 152 182 213 244 274 305 335)
+
+echo
+echo "Case Name        = $case"
+echo "Model Component  = $modelcomp"
+echo "Start Year       = $styr4d"
+echo "End Year         = $endyr4d"
+echo "Input Directory  = $resarch"
+echo "Output Directory = $tsdir"
+echo "Compression      = $comp_switch"
+echo
+echo "Starting timeseries creation..."
+echo
+
+
+# load NCO module and dependancies
+if [ $MACH = "tcs" ] ; then
+  module purge
+  #module load ncl nco/4.0.8 cdo/1.6.1
+  module load gsl/1.13 antlr/2.7.7 netcdf/4.1.2_nc3 nco/4.0.8
+fi
+if [ $MACH = "gpc" ] ; then
+  module purge
+  #module load intel/13.1.1 gcc/4.6.1 udunits/2.1.11 gsl/1.13-intel hdf5/187-v18-serial-intel  netcdf/4.1.3_hdf5_serial-intel python/2.7.5  
+  #module load extras/64_6.4 cdo/1.6.1-intel nco/4.3.2-intel
+  module load intel/15.0.2 gsl/1.15-intel udunits/2.1.11 hdf5/1814-v18-serial-intel netcdf/4.3.3.1_serial-intel nco/4.4.8-intel
+fi 
+
+
+# make output directory
+if [ ! -d $tsdir ]; then
+   mkdir -p $tsdir
+fi
+
+# check model component == all
+if [ "$modelcomp" = "atm" ] ; then
+    ### ATM ###
+    modlist="atm"
+
+elif [ "$modelcomp" = "lnd" ] ; then 
+    ### LND ###
+    modlist="lnd"
+
+elif [ "$modelcomp" = "ocn" ] ; then 
+    ### OCN ###
+    modlist="ocn"
+
+elif [ "$modelcomp" = "ice" ] ; then 
+    ### ICE ###
+    modlist="ice"
+
+elif [ "$modelcomp" = "all" ] ; then 
+    ### ICE ###
+    modlist="atm lnd ocn ice"
+
+else
+    echo "Error: Model Component not defined"
+    exit 1
+fi
+
+# loop over model components or only one if desired
+
+for whichmod in $modlist
+do
+   modelcomp=$(echo $whichmod | xargs)
+   if [ "$modelcomp" = "atm" ] ; then
+       ### ATM ###
+       modpre="cam2.h0"
+       modpp="cam2"
+       mod="atm"
+   elif [ "$modelcomp" = "lnd" ] ; then 
+       ### LND ###
+       modpre="clm2.h0"
+       modpp="clm2"
+       mod="lnd"
+   elif [ "$modelcomp" = "ocn" ] ; then 
+       ### OCN ###
+       modpre="pop.h"
+       modpp="pop"
+       mod="ocn"
+   elif [ "$modelcomp" = "ice" ] ; then 
+       ### ICE ###
+       modpre="cice.h"
+       modpp="cice"
+       mod="ice"
+   else
+       echo "Error: Model Component not defined"
+       exit 1
+   fi
+
+   # Move into local model directory
+   cd ${resarch}/${case}/${mod}/hist
+
+   # GET A LIST OF THE VARIABLES FROM A MODEL FILE
+
+   varlist=$(ncdump -h ${case}.${modpre}.${styr4d}-01.nc | grep long_name | cut -d: -f1 | xargs)
+
+   echo processing $mod....
+
+   for var in $varlist
+   do
+
+      cd ${resarch}/${case}/${mod}/hist
+
+      #echo -ne $var
+      echo " " 
+
+      # DO THE VARIABLE PROCESSING
+
+      # need to test for time concatenation in $var
+      ncrcat -O ${comp_switch} -v $var ${case}.${modpre}.${styr4d}-??.nc ${tsdir}/${case}_${var}_${styr4d}.nc
+      if [ "$?" -ne 0 ] ; then
+	  echo "Variable has no time dimension, creating single variable file:"
+	  echo ${tsdir}/${case}_${mod}-${var}.nc
+	  varnotime=true
+	  ncks -O ${comp_switch} -v $var ${case}.${modpre}.${styr4d}-01.nc ${tsdir}/${case}_${mod}-${var}.nc 
+      else
+	  varnotime=false
+      fi
+
+      # set blank variable for component timeseries file lists 
+      timeseries=
+      # loop over years if varnotime=false
+      if [ "$varnotime" = false ] ; then
+
+	  cd ${resarch}/${case}/${mod}/hist
+	  i=$startyr
+	  while [ $i -le $endyr ]
+	  do
+	    i4d=$(printf "%04d" ${i})
+
+	    echo -ne "["$(date +"%Y-%m-%d %H:%M:%S")"] Concatenating variable: $var for 10 years at: ${i4d}..."
+	    #echo ${tsdir}/${case}_${var}_${i4d}.nc
+
+	    #do parallel (10 years at a time)
+
+	    ncrcat -O ${comp_switch} -v $var ${case}.${modpre}.${i4d}-??.nc ${tsdir}/${case}_${var}_${i4d}.nc &
+	    timeseries="$timeseries ${case}_${var}_${i4d}.nc"
+	    pid0=$!
+	    i=$(expr $i + 1)
+
+	    i4d=$(printf "%04d" ${i})
+	    ncrcat -O ${comp_switch} -v $var ${case}.${modpre}.${i4d}-??.nc ${tsdir}/${case}_${var}_${i4d}.nc &
+	    timeseries="$timeseries ${case}_${var}_${i4d}.nc"
+	    pid1=$!
+	    i=$(expr $i + 1)
+
+	    i4d=$(printf "%04d" ${i})
+	    ncrcat -O ${comp_switch} -v $var ${case}.${modpre}.${i4d}-??.nc ${tsdir}/${case}_${var}_${i4d}.nc &
+	    timeseries="$timeseries ${case}_${var}_${i4d}.nc"
+	    pid2=$!
+	    i=$(expr $i + 1)
+
+	    i4d=$(printf "%04d" ${i})
+	    ncrcat -O ${comp_switch} -v $var ${case}.${modpre}.${i4d}-??.nc ${tsdir}/${case}_${var}_${i4d}.nc &
+	    timeseries="$timeseries ${case}_${var}_${i4d}.nc"
+	    pid3=$!
+	    i=$(expr $i + 1)
+
+	    i4d=$(printf "%04d" ${i})
+	    ncrcat -O ${comp_switch} -v $var ${case}.${modpre}.${i4d}-??.nc ${tsdir}/${case}_${var}_${i4d}.nc &
+	    timeseries="$timeseries ${case}_${var}_${i4d}.nc"
+	    pid4=$!
+	    i=$(expr $i + 1)
+
+	    i4d=$(printf "%04d" ${i})
+	    ncrcat -O ${comp_switch} -v $var ${case}.${modpre}.${i4d}-??.nc ${tsdir}/${case}_${var}_${i4d}.nc &
+	    timeseries="$timeseries ${case}_${var}_${i4d}.nc"
+	    pid5=$!
+	    i=$(expr $i + 1)
+
+	    i4d=$(printf "%04d" ${i})
+	    ncrcat -O ${comp_switch} -v $var ${case}.${modpre}.${i4d}-??.nc ${tsdir}/${case}_${var}_${i4d}.nc &
+	    timeseries="$timeseries ${case}_${var}_${i4d}.nc"
+	    pid6=$!
+	    i=$(expr $i + 1)
+
+	    i4d=$(printf "%04d" ${i})
+	    ncrcat -O ${comp_switch} -v $var ${case}.${modpre}.${i4d}-??.nc ${tsdir}/${case}_${var}_${i4d}.nc &
+	    timeseries="$timeseries ${case}_${var}_${i4d}.nc"
+	    pid7=$!
+	    i=$(expr $i + 1)
+
+	    i4d=$(printf "%04d" ${i})
+	    ncrcat -O ${comp_switch} -v $var ${case}.${modpre}.${i4d}-??.nc ${tsdir}/${case}_${var}_${i4d}.nc &
+	    timeseries="$timeseries ${case}_${var}_${i4d}.nc"
+	    pid8=$!
+	    i=$(expr $i + 1)
+
+	    i4d=$(printf "%04d" ${i})
+	    ncrcat -O ${comp_switch} -v $var ${case}.${modpre}.${i4d}-??.nc ${tsdir}/${case}_${var}_${i4d}.nc &
+	    timeseries="$timeseries ${case}_${var}_${i4d}.nc"
+	    pid9=$!
+
+	    i=$(expr $i + 1)
+
+
+	    echo -ne "\n"
+	    echo "waiting on 10 processes"
+            # wait till background processes are stopped so as to not saturate the node
+	    wait $pid0
+	    wait $pid1
+	    wait $pid2
+	    wait $pid3
+	    wait $pid4
+	    wait $pid5
+	    wait $pid6
+	    wait $pid7
+	    wait $pid8
+	    wait $pid9
+
+	  done
+
+	  cd $tsdir
+	  echo "Concatenating timeseries for ... $var"
+	  # function to count number of elements in variable seperated by space
+	  howmany() { echo $#; }
+	      
+	  #echo $timeseries
+	  #ncrcat -O ${comp_switch} $timeseries ${case}_${mod}-${var}_${styr4d}-${endyr4d}.nc
+	  #use command for large number of files
+	  echo $timeseries | ncrcat -O ${comp_switch} ${case}_${mod}-${var}_${styr4d}-${endyr4d}.nc
+	  if [ "$?" -ne 0 ] ; then
+	    echo "Error: exiting..."
+	    exit 1
+          fi
+
+	  vnum=$(howmany $timeseries)
+	  if [ "$vnum" -gt "1" ] ; then
+	    \rm $timeseries
+	  fi
+
+      fi
+
+   done
+
+   echo "Done $mod"
+
+done
+
+echo "Done all"
