@@ -1,0 +1,248 @@
+#!/bin/bash
+
+# Author: Guido Vettoretti - 2016-07-05
+# This is used for postprocessing timeseries from cesm monthy data (weighted by monthly length)
+# Creates decadal average seasonal timeseries for mod
+# Usage example:
+# --> decseaswgtavg_mod cesmname ocn 1000 1199
+
+function usage {
+  echo 'Usage : decseaswgtavg_mod case model startyear<####> endyear<####>'
+  echo 'decwgtavg_mod takes 5 parameters'
+  echo '# --> decseaswgtavg_mod cesmname model 1000 1199'
+  echo 'Model: atm lnd ocn ice' 
+}
+
+if [ "$#" -le 3 ]
+then
+  usage
+  exit 1
+fi
+
+# load modules
+if [ $MACH = "tcs" ] ; then
+  module purge
+  # nco for netcdf4 format doesn't work on TCS
+  module load xlf/14.1 vacpp/12.1 hdf5/1814-v18-serial-xlc netcdf/4.3.3.1-serial-xlc nco ncl/6.0.0
+fi
+if [ $MACH = "gpc" ] ; then
+  module purge
+  module load intel/15.0.2 gsl/1.15-intel udunits/2.1.11 hdf5/1814-v18-serial-intel netcdf/4.3.3.1_serial-intel  nco/4.4.8-intel gnu-parallel/20150822
+fi 
+
+
+logdir=$(pwd)
+dpm=(31 28 31 30 31 30 31 31 30 31 30 31)
+doy=(1 32 60 91 121 152 182 213 244 274 305 335)
+case=$1
+model=$2
+startyr=$3
+endyr=$4
+
+if [ $model == 'atm' ] ; then 
+modpre="cam2.h0"
+modpp="cam2"
+mod="atm"
+elif  [ $model == 'lnd' ] ; then
+modpre="clm2.h0"
+modpp="clm2"
+mod="lnd"
+elif  [ $model == 'ocn' ] ; then
+modpre="pop.h"
+modpp="pop"
+mod="ocn"
+elif  [ $model == 'ice' ] ; then
+modpre="cice.h"
+modpp="cice"
+mod="ice"
+else
+    echo "Error: model type not found..."
+    exit 1
+fi 
+
+export case=${case}
+export modpp=${modpp}
+export mod=${mod}
+
+resarch=$RES/archive # reserved archive (input)
+dd=$RES/diagdata/$case  #diagnostic data directory (output)
+bindir=/home/p/peltier/guido/bin # where the script resides
+
+if [ ! -d $dd ] ;
+then
+    mkdir -p $dd
+fi
+
+
+# count number of elements in variable seperated by space
+#function howmany() { echo $#; }
+
+# set blank variable for component timeseries file lists 
+mod_djf_tswavg=
+mod_mam_tswavg=
+mod_jja_tswavg=
+mod_son_tswavg=
+
+styr4d=$(printf "%04d" ${startyr})
+endyr4d=$(printf "%04d" ${endyr})
+
+
+function modavg {
+
+
+ datadir=${resarch}/${case}/${mod}/hist
+ cd $datadir
+
+ i=$startyr
+ while [ $i -le $endyr ]
+ do
+  i4d=$(printf "%04d" ${i})
+
+  decade=$(expr $i / 10)
+  dec3d=$(printf "%03d" ${decade})
+
+  echo -ne "["$(date +"%Y-%m-%d %H:%M:%S")"] Creating weighted (by month length) average for each month for decade: ${decade}..."
+  for mth in {0..11}; do
+    #echo -ne .
+    mmp1=$(expr $mth + 1)
+    mm=$(printf "%02d" ${mmp1})
+    echo -ne "${mod}:${mm}-"
+    if [ ! -f ${case}.${modpp}.${dec3d}0-${dec3d}9-${mm}_avg.nc ] ; then
+          # add commands to a file to be run with gnu-parallel
+          echo "( cd ${resarch}/${case}/${mod}/hist ; ncra -O ${case}.${modpre}.${dec3d}[0-9]-${mm}.nc ${case}.${modpp}.${dec3d}0-${dec3d}9-${mm}_avg.nc )" >> pll_coms 
+          echo "( cd ${resarch}/${case}/${mod}/hist ; ncap2 -O -s "dpm=time*0.+${dpm[${mth}]}" ${case}.${modpp}.${dec3d}0-${dec3d}9-${mm}_avg.nc ${i4d}_${mm}_${mod}avgtmp.nc )" >> pll_coms
+    else
+          echo "Found file: " ${case}.${modpp}.${dec3d}0-${dec3d}9-${mm}_avg.nc
+          if $(ncdump -v dpm ${case}.${modpp}.${dec3d}0-${dec3d}9-${mm}_avg.nc >> /dev/null ) ; then
+            echo 'dmp exists'
+          else
+            #echo 'Creating dpm variable'
+            # add commands to a file to be run with gnu-parallel
+            echo "( cd ${resarch}/${case}/${mod}/hist ; ncap2 -O -s "dpm=time*0.+${dpm[${mth}]}" ${case}.${modpp}.${dec3d}0-${dec3d}9-${mm}_avg.nc ${i4d}_${mm}_${mod}avgtmp.nc )" >> pll_coms
+          fi
+    fi
+  done
+  # now run all the nco commands generated in the monthly for loop
+  echo "***Ignore nco mv errors***"
+  parallel :::: pll_coms
+  wait
+  \rm pll_coms
+
+  echo "creating lnd seasonal wgt avg for year: ${i}"
+  # do seasonal averaging for each decade
+  # ncwa seems to work better than cdo yearmonmean (-b keeps time coordinate to 1 and keeps time unlimited for concatinating decades)
+  # djf
+  #use gnu-parallel
+  export i4d=${i4d}
+
+  seas='DJF'
+  echo "averaging ${seas} timeseries for year ${i4d}.."
+  monidx=(12 01 02)
+  if [ ! -f ${case}.${modpp}.${i4d}_${seas}_wgtavg.nc ] ; then
+    decavgfiles_DJF=$(ls ${i4d}_${monidx[0]}_${mod}avgtmp.nc ${i4d}_${monidx[1]}_${mod}avgtmp.nc ${i4d}_${monidx[2]}_${mod}avgtmp.nc)
+    echo ncrcat -O $decavgfiles_DJF ${i4d}_${seas}_${mod}timeseries_tmp.nc >> avg_coms_djf
+    echo ncwa -O -b -a time -w dpm ${i4d}_${seas}_${mod}timeseries_tmp.nc ${i4d}_${seas}_${mod}wgtavg.nc >> avg_coms_djf
+    echo ncks -O -x -v dpm ${i4d}_${seas}_${mod}wgtavg.nc ${case}.${modpp}.${i4d}_${seas}_wgtavg.nc >> avg_coms_djf
+  fi
+  mod_djf_tswavg="$mod_djf_tswavg ${case}.${modpp}.${i4d}_${seas}_wgtavg.nc"
+  # mam
+  seas='MAM'
+  echo "averaging ${seas} timeseries for year ${i4d}.."
+  monidx=(03 04 05)
+  if [ ! -f ${case}.${modpp}.${i4d}_${seas}_wgtavg.nc ] ; then
+    decavgfiles_MAM=$(ls ${i4d}_${monidx[0]}_${mod}avgtmp.nc ${i4d}_${monidx[1]}_${mod}avgtmp.nc ${i4d}_${monidx[2]}_${mod}avgtmp.nc)
+    echo ncrcat -O $decavgfiles_MAM ${i4d}_${seas}_${mod}timeseries_tmp.nc >> avg_coms_mam
+    echo ncwa -O -b -a time -w dpm ${i4d}_${seas}_${mod}timeseries_tmp.nc ${i4d}_${seas}_${mod}wgtavg.nc >> avg_coms_mam
+    echo ncks -O -x -v dpm ${i4d}_${seas}_${mod}wgtavg.nc ${case}.${modpp}.${i4d}_${seas}_wgtavg.nc >> avg_coms_mam
+  fi
+  mod_mam_tswavg="$mod_mam_tswavg ${case}.${modpp}.${i4d}_${seas}_wgtavg.nc"
+  # jja
+  seas='JJA'
+  echo "averaging ${seas} timeseries for year ${i4d}.."
+  monidx=(06 07 08)
+  if [ ! -f ${case}.${modpp}.${i4d}_${seas}_wgtavg.nc ] ; then
+    decavgfiles_JJA=$(ls ${i4d}_${monidx[0]}_${mod}avgtmp.nc ${i4d}_${monidx[1]}_${mod}avgtmp.nc ${i4d}_${monidx[2]}_${mod}avgtmp.nc)
+    echo ncrcat -O $decavgfiles_JJA ${i4d}_${seas}_${mod}timeseries_tmp.nc >> avg_coms_jja
+    echo ncwa -O -b -a time -w dpm ${i4d}_${seas}_${mod}timeseries_tmp.nc ${i4d}_${seas}_${mod}wgtavg.nc >> avg_coms_jja
+    echo ncks -O -x -v dpm ${i4d}_${seas}_${mod}wgtavg.nc ${case}.${modpp}.${i4d}_${seas}_wgtavg.nc >> avg_coms_jja
+  fi
+  mod_jja_tswavg="$mod_jja_tswavg ${case}.${modpp}.${i4d}_${seas}_wgtavg.nc"
+  # son
+  seas='SON'
+  echo "averaging ${seas} timeseries for year ${i4d}.."
+  monidx=(09 10 11)
+  if [ ! -f ${case}.${modpp}.${i4d}_${seas}_wgtavg.nc ] ; then
+    decavgfiles_SON=$(ls ${i4d}_${monidx[0]}_${mod}avgtmp.nc ${i4d}_${monidx[1]}_${mod}avgtmp.nc ${i4d}_${monidx[2]}_${mod}avgtmp.nc)
+    echo ncrcat -O $decavgfiles_SON ${i4d}_${seas}_${mod}timeseries_tmp.nc >> avg_coms_son
+    echo ncwa -O -b -a time -w dpm ${i4d}_${seas}_${mod}timeseries_tmp.nc ${i4d}_${seas}_${mod}wgtavg.nc >> avg_coms_son
+    echo ncks -O -x -v dpm ${i4d}_${seas}_${mod}wgtavg.nc ${case}.${modpp}.${i4d}_${seas}_wgtavg.nc >> avg_coms_son
+  fi
+  mod_son_tswavg="$mod_son_tswavg ${case}.${modpp}.${i4d}_${seas}_wgtavg.nc"
+
+  # now run all the nco seas avg commands
+  chmod +x $datadir/avg_coms_djf $datadir/avg_coms_mam $datadir/avg_coms_jja $datadir/avg_coms_son
+  #cat $datadir/avg_coms_djf
+  $datadir/avg_coms_djf &
+  $datadir/avg_coms_mam &
+  $datadir/avg_coms_jja &
+  $datadir/avg_coms_son &
+  wait
+
+  \rm $datadir/avg_coms_djf
+  \rm $datadir/avg_coms_mam
+  \rm $datadir/avg_coms_jja
+  \rm $datadir/avg_coms_son
+
+  seas='DJF'
+  \rm ${i4d}_${seas}_${mod}timeseries_tmp.nc $decavgfiles_DJF ${i4d}_${seas}_${mod}wgtavg.nc
+  seas='MAM'
+  \rm ${i4d}_${seas}_${mod}timeseries_tmp.nc $decavgfiles_MAM ${i4d}_${seas}_${mod}wgtavg.nc
+  seas='JJA'
+  \rm ${i4d}_${seas}_${mod}timeseries_tmp.nc $decavgfiles_JJA ${i4d}_${seas}_${mod}wgtavg.nc
+  seas='SON'
+  \rm ${i4d}_${seas}_${mod}timeseries_tmp.nc $decavgfiles_SON ${i4d}_${seas}_${mod}wgtavg.nc
+
+
+  i=$(expr $i + 10)
+ done
+  
+}
+
+
+echo -ne "\n"
+
+### LAND ###
+#weighted decadal average
+
+modavg $startyr $endyr
+echo -ne "Concatenating Averages..."
+echo "cat series: ${mod}..."
+seas='DJF'
+echo ${seas}: $mod_djf_tswavg
+echo "ncrcat -O $mod_djf_tswavg ${dd}/${case}_${styr4d}-${endyr4d}_${mod}_${seas}_wgtavg.nc" >> pll_coms1
+seas='MAM'
+echo ${seas}: $mod_mam_tswavg
+echo "ncrcat -O $mod_mam_tswavg ${dd}/${case}_${styr4d}-${endyr4d}_${mod}_${seas}_wgtavg.nc" >> pll_coms1
+seas='JJA'
+echo ${seas}: $mod_jja_tswavg
+echo "ncrcat -O $mod_jja_tswavg ${dd}/${case}_${styr4d}-${endyr4d}_${mod}_${seas}_wgtavg.nc" >> pll_coms1
+seas='SON'
+echo ${seas}: $mod_son_tswavg
+echo "ncrcat -O $mod_son_tswavg ${dd}/${case}_${styr4d}-${endyr4d}_${mod}_${seas}_wgtavg.nc" >> pll_coms1
+echo -ne "\n"
+echo "***Ignore nco mv errors***"
+parallel :::: pll_coms1
+wait
+\rm pll_coms1
+
+
+echo " "
+echo "Removing leftover files:"
+\rm $mod_djf_tswavg
+\rm $mod_mam_tswavg
+\rm $mod_jja_tswavg
+\rm $mod_son_tswavg
+
+echo " "
+echo "Done."
+
